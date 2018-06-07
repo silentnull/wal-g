@@ -4,12 +4,17 @@ import (
 	"archive/tar"
 	"github.com/pkg/errors"
 	"io"
-	"os"
-	"strconv"
 )
 
 func min(a, b int) int {
 	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
 		return a
 	}
 	return b
@@ -78,7 +83,7 @@ func tarHandler(wc io.WriteCloser, rm ReaderMaker, crypter Crypter) error {
 			return errors.Wrap(err, "ExtractAll: lzo decompress failed. Is archive encrypted?")
 		}
 	} else if rm.Format() == "lz4" {
-		err = DecompressLz4(wc, r)
+		_, err = DecompressLz4(wc, r)
 		if err != nil {
 			return errors.Wrap(err, "ExtractAll: lz4 decompress failed. Is archive encrypted?")
 		}
@@ -116,14 +121,7 @@ func ExtractAll(ti TarInterpreter, files []ReaderMaker) error {
 	}()
 
 	// Set maximum number of goroutines spun off by ExtractAll
-	var con int
-
-	conc, ok := os.LookupEnv("WALG_DOWNLOAD_CONCURRENCY")
-	if ok {
-		con, _ = strconv.Atoi(conc)
-	} else {
-		con = min(10, len(files))
-	}
+	var con = getMaxDownloadConcurrency(min(len(files), 10))
 
 	concurrent := make(chan Empty, con)
 	for i := 0; i < con; i++ {

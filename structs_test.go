@@ -2,8 +2,11 @@ package walg_test
 
 import (
 	"archive/tar"
-	"github.com/wal-g/wal-g"
 	"testing"
+
+	"github.com/wal-g/wal-g"
+	"os"
+	"time"
 )
 
 // Tests S3 get and set methods.
@@ -17,9 +20,10 @@ func TestS3TarBall(t *testing.T) {
 		BaseDir:  "tmp",
 		Trim:     "/usr/local",
 		BkupName: "test",
+		Tu:       walg.NewTarUploader(&mockS3Client{}, "bucket", "server", "region"),
 	}
 
-	bundle.NewTarBall()
+	bundle.NewTarBall(false)
 	tarBallCounter += 1
 
 	if bundle.Tb == nil {
@@ -36,7 +40,7 @@ func TestS3TarBall(t *testing.T) {
 		t.Errorf("make: Expected trim to be '%s' but got '%s'", "/usr/local", tarBall.Trim())
 	}
 
-	if tarBall.Nop() != false {
+	if tarBall.Nop() {
 		t.Errorf("make: S3TarBall expected NOP to be false but got %v", tarBall.Nop())
 	}
 
@@ -49,7 +53,7 @@ func TestS3TarBall(t *testing.T) {
 	}
 
 	increase := 1024
-	tarBall.SetSize(int64(increase))
+	tarBall.AddSize(int64(increase))
 
 	if tarBall.Size() != 1024 {
 		t.Errorf("make: Tarball size expected to increase to %d but got %d", increase, tarBall.Size())
@@ -59,7 +63,7 @@ func TestS3TarBall(t *testing.T) {
 		t.Errorf("make: Tarball writer should not be set up without calling SetUp()")
 	}
 
-	bundle.NewTarBall()
+	bundle.NewTarBall(false)
 	tarBallCounter += 1
 
 	if tarBall == bundle.Tb {
@@ -79,7 +83,7 @@ func TestS3DependentFunctions(t *testing.T) {
 		MinSize: 100,
 	}
 
-	tu := walg.NewTarUploader(&mockS3Client{}, "bucket", "server", "region", 1, float64(1))
+	tu := walg.NewTarUploader(&mockS3Client{}, "bucket", "server", "region")
 	tu.Upl = &mockS3Uploader{}
 
 	bundle.Tbm = &walg.S3TarBallMaker{
@@ -89,7 +93,7 @@ func TestS3DependentFunctions(t *testing.T) {
 		Tu:       tu,
 	}
 
-	bundle.NewTarBall()
+	bundle.NewTarBall(false)
 	tarBall := bundle.Tb
 	tarBall.SetUp(walg.MockArmedCrypter())
 	tarWriter := tarBall.Tw()
@@ -120,19 +124,141 @@ func TestS3DependentFunctions(t *testing.T) {
 		t.Errorf("structs: expected WriteAfterClose error but got '<nil>'")
 	}
 
-	err = tarBall.Finish(true)
+	err = tarBall.Finish(&walg.S3TarBallSentinelDto{})
 	if err != nil {
 		t.Errorf("structs: tarball did not finish correctly with error %s", err)
 	}
 
 	// Test naming property of SetUp().
-	bundle.NewTarBall()
+	bundle.NewTarBall(false)
 	tarBall = bundle.Tb
 	tarBall.SetUp(walg.MockArmedCrypter(), "mockTarball")
 	tarBall.CloseTar()
-	err = tarBall.Finish(true)
+	err = tarBall.Finish(&walg.S3TarBallSentinelDto{})
 	if err != nil {
 		t.Errorf("structs: tarball did not finish correctly with error %s", err)
 	}
 
+}
+
+func TestEmptyBundleQueue(t *testing.T) {
+
+	bundle := &walg.Bundle{
+		MinSize: 100,
+	}
+
+	tu := walg.NewTarUploader(&mockS3Client{}, "bucket", "server", "region")
+	tu.Upl = &mockS3Uploader{}
+
+	bundle.Tbm = &walg.S3TarBallMaker{
+		BaseDir:  "mockDirectory",
+		Trim:     "",
+		BkupName: "mockBackup",
+		Tu:       tu,
+	}
+
+	bundle.StartQueue()
+
+	err := bundle.FinishQueue()
+	if err != nil {
+		t.Log(err)
+	}
+}
+
+func TestBundleQueue(t *testing.T) {
+
+	queueTest(t)
+
+}
+
+func TestBundleQueueHC(t *testing.T) {
+
+	os.Setenv("WALG_UPLOAD_CONCURRENCY", "100")
+
+	queueTest(t)
+
+	os.Unsetenv("WALG_UPLOAD_CONCURRENCY")
+}
+
+func TestBundleQueueLC(t *testing.T) {
+
+	os.Setenv("WALG_UPLOAD_CONCURRENCY", "1")
+
+	queueTest(t)
+
+	os.Unsetenv("WALG_UPLOAD_CONCURRENCY")
+}
+
+func queueTest(t *testing.T) {
+	bundle := &walg.Bundle{
+		MinSize: 100,
+	}
+	tu := walg.NewTarUploader(&mockS3Client{}, "bucket", "server", "region")
+	tu.Upl = &mockS3Uploader{}
+	bundle.Tbm = &walg.S3TarBallMaker{
+		BaseDir:  "mockDirectory",
+		Trim:     "",
+		BkupName: "mockBackup",
+		Tu:       tu,
+	}
+
+	f := false
+	tr := true
+	// For tests there must be at leaest 3 workers
+
+	bundle.StartQueue()
+
+	a := bundle.Deque()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		bundle.EnqueueBack(a, &tr)
+		time.Sleep(10 * time.Millisecond)
+		bundle.EnqueueBack(a, &f)
+	}()
+
+	c := bundle.Deque()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		bundle.CheckSizeAndEnqueueBack(c)
+	}()
+
+	b := bundle.Deque()
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		bundle.EnqueueBack(b, &f)
+	}()
+
+	err := bundle.FinishQueue()
+	if err != nil {
+		t.Log(err)
+	}
+}
+
+func TestUserData(t *testing.T) {
+
+	os.Setenv("WALG_SENTINEL_USER_DATA", "1.0")
+
+	data := walg.GetSentinelUserData()
+	t.Log(data)
+	if 1.0 != data.(float64) {
+		t.Fatal("Unable to parse WALG_SENTINEL_USER_DATA")
+	}
+
+	os.Setenv("WALG_SENTINEL_USER_DATA", "\"1\"")
+
+	data = walg.GetSentinelUserData()
+	t.Log(data)
+	if "1" != data.(string) {
+		t.Fatal("Unable to parse WALG_SENTINEL_USER_DATA")
+	}
+
+	os.Setenv("WALG_SENTINEL_USER_DATA", `{"x":123,"y":["asdasd",123]}`)
+
+	data = walg.GetSentinelUserData()
+	t.Log(data)
+	if nil == data {
+		t.Fatal("Unable to parse WALG_SENTINEL_USER_DATA")
+	}
+
+	os.Unsetenv("WALG_UPLOAD_CONCURRENCY")
 }

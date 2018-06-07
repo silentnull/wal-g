@@ -83,7 +83,7 @@ func main() {
 			panic(err)
 		}
 
-		n, err := bundle.StartBackup(c, time.Now().String(), in)
+		n, _, _, err := bundle.StartBackup(c, time.Now().String())
 		if err != nil {
 			fmt.Printf("%+v\n", err)
 			os.Exit(1)
@@ -96,23 +96,23 @@ func main() {
 			Tu:       tu,
 		}
 
-		bundle.NewTarBall()
+		bundle.NewTarBall(false)
 		bundle.HandleLabelFiles(c)
 
 	}
 
-	bundle.NewTarBall()
+	bundle.StartQueue()
 	defer tools.TimeTrack(time.Now(), "MAIN")
 	fmt.Println("Walking ...")
 	err = filepath.Walk(in, bundle.TarWalker)
 	if err != nil {
 		panic(err)
 	}
-	err = bundle.Tb.CloseTar()
+	err = bundle.FinishQueue()
 	if err != nil {
 		panic(err)
 	}
-	err = bundle.Tb.Finish(true)
+	err = bundle.Tb.Finish(&walg.S3TarBallSentinelDto{})
 	if err != nil {
 		panic(err)
 	}

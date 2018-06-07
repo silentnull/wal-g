@@ -1,9 +1,10 @@
 package walg_test
 
 import (
-	"github.com/wal-g/wal-g"
 	"os"
 	"testing"
+
+	"github.com/wal-g/wal-g"
 )
 
 // Sets WAL-G needed environment variables to empty strings.
@@ -82,7 +83,6 @@ func doConfigureWithBuсketPath(t *testing.T, bucketPath string, expectedServer 
 	//Test empty environment variables
 	setEmpty(t)
 	tu, pre, err := walg.Configure()
-	err.Error()
 	if _, ok := err.(*walg.UnsetEnvVarError); !ok {
 		t.Errorf("upload: Expected error 'UnsetEnvVarError' but got %s", err)
 	}
@@ -105,6 +105,9 @@ func doConfigureWithBuсketPath(t *testing.T, bucketPath string, expectedServer 
 		t.Log(err)
 	}
 	tu, pre, err = walg.Configure()
+	if err != nil {
+		t.Errorf("upload: unexpected error %v", err)
+	}
 	if *pre.Bucket != "bucket" {
 		t.Errorf("upload: Prefix field 'Bucket' expected %s but got %s", "bucket", *pre.Bucket)
 	}
@@ -127,6 +130,9 @@ func doConfigureWithBuсketPath(t *testing.T, bucketPath string, expectedServer 
 		t.Log(err)
 	}
 	tu, pre, err = walg.Configure()
+	if err != nil {
+		t.Log(err)
+	}
 	if tu.StorageClass != "STANDARD_IA" {
 		t.Errorf("upload: TarUploader field 'StorageClass' expected %s but got %s", "STANDARD_IA", tu.StorageClass)
 	}
@@ -135,7 +141,7 @@ func doConfigureWithBuсketPath(t *testing.T, bucketPath string, expectedServer 
 func TestValidUploader(t *testing.T) {
 	mockSvc := &mockS3Client{}
 
-	tu := walg.NewTarUploader(mockSvc, "bucket", "server", "region", 1, float64(1))
+	tu := walg.NewTarUploader(mockSvc, "bucket", "server", "region")
 	if tu == nil {
 		t.Errorf("upload: Did not create a new tar uploader")
 	}
@@ -153,7 +159,7 @@ func TestUploadError(t *testing.T) {
 		err: true,
 	}
 
-	tu := walg.NewTarUploader(mockClient, "bucket", "server", "region", 2, float64(2))
+	tu := walg.NewTarUploader(mockClient, "bucket", "server", "region")
 	tu.Upl = mockUploader
 
 	maker := &walg.S3TarBallMaker{
@@ -163,11 +169,11 @@ func TestUploadError(t *testing.T) {
 		Tu:       tu,
 	}
 
-	tarBall := maker.Make()
+	tarBall := maker.Make(true)
 	tarBall.SetUp(walg.MockArmedCrypter())
 
-	tarBall.Finish(true)
-	if tu.Success == true {
+	tarBall.Finish(&walg.S3TarBallSentinelDto{})
+	if tu.Success {
 		t.Errorf("upload: expected to fail to upload successfully")
 	}
 
@@ -175,16 +181,15 @@ func TestUploadError(t *testing.T) {
 		multierr: true,
 	}
 
-	tarBall = maker.Make()
+	tarBall = maker.Make(true)
 	tarBall.SetUp(walg.MockArmedCrypter())
-	tarBall.Finish(true)
-	if tu.Success == true {
+	tarBall.Finish(&walg.S3TarBallSentinelDto{})
+	if tu.Success {
 		t.Errorf("upload: expected to fail to upload successfully")
 	}
 
-	_, err := tu.UploadWal("fake path")
+	_, err := tu.UploadWal("fake path", nil, false)
 	if err == nil {
 		t.Errorf("upload: UploadWal expected error but got `<nil>`")
 	}
-
 }

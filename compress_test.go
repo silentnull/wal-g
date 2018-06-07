@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/pierrec/lz4"
 	"github.com/wal-g/wal-g"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"testing"
@@ -49,7 +50,10 @@ var tests = []struct {
 func TestLz4Close(t *testing.T) {
 	for _, tt := range tests {
 		b := &BufCloser{bytes.NewBufferString(tt.testString), false}
-		lz := &walg.Lz4CascadeClose{lz4.NewWriter(b), b}
+		lz := &walg.Lz4CascadeClose{
+			Writer:     lz4.NewWriter(b),
+			Underlying: b,
+		}
 
 		random := make([]byte, tt.written)
 		_, err := rand.Read(random)
@@ -82,7 +86,10 @@ func TestLz4Close(t *testing.T) {
 
 func TestLz4CloseError(t *testing.T) {
 	mock := &ErrorWriteCloser{}
-	lz := &walg.Lz4CascadeClose{lz4.NewWriter(mock), mock}
+	lz := &walg.Lz4CascadeClose{
+		Writer:     lz4.NewWriter(mock),
+		Underlying: mock,
+	}
 
 	_, err := lz.Write([]byte{byte('a')})
 	if err == nil {
@@ -106,7 +113,7 @@ func TestLzPipeWriter(t *testing.T) {
 		lz.Compress(walg.MockDisarmedCrypter())
 
 		decompressed := &BufCloser{&bytes.Buffer{}, false}
-		err := walg.DecompressLz4(decompressed, lz.Output)
+		_, err := walg.DecompressLz4(decompressed, lz.Output)
 		if err != nil {
 			t.Logf("%+v\n", err)
 		}
@@ -118,13 +125,71 @@ func TestLzPipeWriter(t *testing.T) {
 
 }
 
+func TestLzPipeWriterBigChunk(t *testing.T) {
+	L := 1024 * 1024 // 1Mb
+	b := make([]byte, L)
+	rand.Read(b)
+	in := &BufCloser{bytes.NewBuffer(b), false}
+	lz := &walg.LzPipeWriter{
+		Input: in,
+	}
+
+	lz.Compress(walg.MockDisarmedCrypter())
+
+	decompressed := &BufCloser{&bytes.Buffer{}, false}
+	_, err := walg.DecompressLz4(decompressed, lz.Output)
+	if err != nil {
+		t.Logf("%+v\n", err)
+	}
+
+	if !bytes.Equal(b, decompressed.Bytes()) {
+		t.Errorf("Incorrect decompression")
+	}
+
+}
+
+type DelayedErrorReader struct {
+	underlying io.Reader
+	n          int
+}
+
+func (er *DelayedErrorReader) Read(p []byte) (int, error) {
+	x, err := er.underlying.Read(p)
+	if err != nil {
+		return -1, err
+	}
+	er.n -= x
+	if er.n < 0 {
+		return -1, errors.New("mock reader: read error")
+	} else {
+		return x, nil
+	}
+}
+
+func TestLzPipeWriterErrorPropogation(t *testing.T) {
+	L := 1024 * 1024 * 4
+	b := make([]byte, L)
+	rand.Read(b)
+	in := &BufCloser{bytes.NewBuffer(b), false}
+	lz := &walg.LzPipeWriter{
+		Input: in,
+	}
+
+	lz.Compress(walg.MockDisarmedCrypter())
+
+	decompressed := &BufCloser{&bytes.Buffer{}, false}
+	_, err := walg.DecompressLz4(decompressed, &DelayedErrorReader{lz.Output, L})
+	if err == nil {
+		t.Error("lz4 did not propagate error of the buffer")
+	}
+}
+
 func TestLzPipeWriterError(t *testing.T) {
 	lz := &walg.LzPipeWriter{Input: &ErrorReader{}}
 
 	lz.Compress(walg.MockDisarmedCrypter())
 
 	_, err := ioutil.ReadAll(lz.Output)
-	err.Error()
 	if err == nil {
 		t.Errorf("compress: LzPipeWriter expected error but got `<nil>`")
 	}

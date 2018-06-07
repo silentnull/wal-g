@@ -3,11 +3,12 @@ package tools
 import (
 	"archive/tar"
 	"fmt"
-	"github.com/pierrec/lz4"
-	"github.com/wal-g/wal-g"
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/pierrec/lz4"
+	"github.com/wal-g/wal-g"
 )
 
 // FileTarBall represents a tarball that is
@@ -41,10 +42,17 @@ func (fb *FileTarBall) SetUp(crypter walg.Crypter, names ...string) {
 				panic(err)
 			}
 
-			fb.w = &walg.Lz4CascadeClose2{lz4.NewWriter(f), wc, f}
+			fb.w = &walg.Lz4CascadeClose2{
+				Writer:      lz4.NewWriter(f),
+				Underlying:  wc,
+				Underlying2: f,
+			}
 		} else {
-			wc = f;
-			fb.w = &walg.Lz4CascadeClose{lz4.NewWriter(f), wc}
+			wc = f
+			fb.w = &walg.Lz4CascadeClose{
+				Writer:     lz4.NewWriter(f),
+				Underlying: wc,
+			}
 		}
 
 		fb.tw = tar.NewWriter(fb.w)
@@ -59,15 +67,11 @@ func (fb *FileTarBall) CloseTar() error {
 		return err
 	}
 
-	err = fb.w.Close()
-	if err != nil {
-		return err
-	}
-	return nil
+	return fb.w.Close()
 }
 
 // Finish alerts that compression is complete.
-func (fb *FileTarBall) Finish(uploadStopSentinel bool) error {
+func (fb *FileTarBall) Finish(sentinel *walg.S3TarBallSentinelDto) error {
 	fmt.Printf("Wrote %d compressed tar files to %s.\n", fb.number, fb.out)
 	return nil
 }
@@ -77,8 +81,9 @@ func (fb *FileTarBall) Trim() string    { return fb.trim }
 func (fb *FileTarBall) Nop() bool       { return fb.nop }
 func (fb *FileTarBall) Number() int     { return fb.number }
 func (fb *FileTarBall) Size() int64     { return fb.size }
-func (fb *FileTarBall) SetSize(i int64) { fb.size += i }
+func (fb *FileTarBall) AddSize(i int64) { fb.size += i }
 func (fb *FileTarBall) Tw() *tar.Writer { return fb.tw }
+func (b *FileTarBall) AwaitUploads()    {}
 
 // NOPTarBall mocks a tarball. Used for testing purposes.
 type NOPTarBall struct {
@@ -90,9 +95,9 @@ type NOPTarBall struct {
 	tw      *tar.Writer
 }
 
-func (n *NOPTarBall) SetUp(crypter walg.Crypter, params ...string) { return }
+func (n *NOPTarBall) SetUp(crypter walg.Crypter, params ...string) {}
 func (n *NOPTarBall) CloseTar() error                              { return nil }
-func (n *NOPTarBall) Finish(uploadStopSentinel bool) error {
+func (n *NOPTarBall) Finish(sentinel *walg.S3TarBallSentinelDto) error {
 	fmt.Printf("NOP: %d files.\n", n.number)
 	return nil
 }
@@ -102,5 +107,6 @@ func (n *NOPTarBall) Trim() string    { return n.trim }
 func (n *NOPTarBall) Nop() bool       { return n.nop }
 func (n *NOPTarBall) Number() int     { return n.number }
 func (n *NOPTarBall) Size() int64     { return n.size }
-func (n *NOPTarBall) SetSize(i int64) { n.size += i }
+func (n *NOPTarBall) AddSize(i int64) { n.size += i }
 func (n *NOPTarBall) Tw() *tar.Writer { return n.tw }
+func (b *NOPTarBall) AwaitUploads()   {}

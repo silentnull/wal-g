@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"sync"
 )
 
 const BUFSIZE = 4 * 1024
@@ -68,11 +69,17 @@ func generateData(t *testing.T) string {
 	fmt.Println(dir)
 
 	sb := tools.NewStrideByteReader(10)
-	lr := &io.LimitedReader{sb, int64(1024 * 1024)}
+	lr := &io.LimitedReader{
+		R: sb,
+		N: int64(1024 * 1024),
+	}
 
 	// Generates 5 1MB files
 	for i := 1; i < 6; i++ {
-		lr = &io.LimitedReader{sb, int64(100)}
+		lr = &io.LimitedReader{
+			R: sb,
+			N: int64(100),
+		}
 		f, err := os.Create(filepath.Join(dir, strconv.Itoa(i)))
 		if err != nil {
 			t.Log(err)
@@ -107,7 +114,10 @@ func generateData(t *testing.T) string {
 	}
 
 	// Generate large enough file (500MB) so that goroutine doesn't finish before extracting pg_control
-	lr = &io.LimitedReader{sb, int64(500 * 1024 * 1024)}
+	lr = &io.LimitedReader{
+		R: sb,
+		N: int64(500 * 1024 * 1024),
+	}
 	_, err = io.Copy(s, lr)
 	if err != nil {
 		t.Log(err)
@@ -156,7 +166,7 @@ func extract(t *testing.T, dir string) string {
 
 	outDir := filepath.Join(filepath.Dir(dir), "extracted")
 
-	ft := &walg.FileTarInterpreter{outDir}
+	ft := &walg.FileTarInterpreter{NewDir: outDir}
 	err = os.MkdirAll(outDir, 0766)
 	if err != nil {
 		t.Log(err)
@@ -254,8 +264,14 @@ func computeSha(t *testing.T, file1, file2 string) bool {
 	buf1 := make([]byte, BUFSIZE)
 	buf2 := make([]byte, BUFSIZE)
 
-	l1 := &io.LimitedReader{f1, BUFSIZE}
-	l2 := &io.LimitedReader{f2, BUFSIZE}
+	l1 := &io.LimitedReader{
+		R: f1,
+		N: BUFSIZE,
+	}
+	l2 := &io.LimitedReader{
+		R: f2,
+		N: BUFSIZE,
+	}
 
 	l1.Read(buf1)
 	l2.Read(buf2)
@@ -310,6 +326,7 @@ func TestWalk(t *testing.T) {
 	// Bundle and compress files to `compressed`.
 	bundle := &walg.Bundle{
 		MinSize: int64(10),
+		Files:   &sync.Map{},
 	}
 	compressed := filepath.Join(filepath.Dir(data), "compressed")
 	bundle.Tbm = &tools.FileTarBallMaker{
@@ -322,18 +339,19 @@ func TestWalk(t *testing.T) {
 		t.Log(err)
 	}
 
-	bundle.NewTarBall()
+	bundle.StartQueue()
 	fmt.Println("Walking ...")
 	err = filepath.Walk(data, bundle.TarWalker)
 	if err != nil {
 		t.Log(err)
 	}
 
-	err = bundle.Tb.CloseTar()
+	err = bundle.FinishQueue()
 	if err != nil {
 		t.Log(err)
 	}
-	err = bundle.Tb.Finish(true)
+
+	err = bundle.Tb.Finish(&walg.S3TarBallSentinelDto{})
 	if err != nil {
 		t.Log(err)
 	}
@@ -366,9 +384,9 @@ func TestWalk(t *testing.T) {
 	}
 
 	// Re-use generated data to test uploading WAL.
-	tu := walg.NewTarUploader(&mockS3Client{}, "bucket", "server", "region", 2, float64(1))
+	tu := walg.NewTarUploader(&mockS3Client{}, "bucket", "server", "region")
 	tu.Upl = &mockS3Uploader{}
-	wal, err := tu.UploadWal(filepath.Join(data, "1"))
+	wal, err := tu.UploadWal(filepath.Join(data, "1"), nil, false)
 	if wal == "" {
 		t.Errorf("upload: expected wal path to be set but got ''")
 	}

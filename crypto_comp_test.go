@@ -1,14 +1,14 @@
 package walg
 
 import (
-	"os"
 	"bytes"
-	"io/ioutil"
 	"io"
-	"os/exec"
-	"testing"
-	"strings"
+	"io/ioutil"
 	"math/rand"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
 )
 
 const waleGpgKey string = `
@@ -169,7 +169,7 @@ func TestDecryptWALElzo(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	/* Unfortunatly, we cannot quietly uninstall test keyring. This is why this test is not executed by default.
+	/* Unfortunately, we cannot quietly uninstall test keyring. This is why this test is not executed by default.
 	command = exec.Command(gpgBin, "--delete-secret-key", "--yes", "D32100BF1CDA62E5E50008F751EFFF0B6548E47F")
 	_, err = command.Output()
 	if err != nil {

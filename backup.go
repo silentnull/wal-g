@@ -1,12 +1,15 @@
 package walg
 
 import (
+	"encoding/json"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3iface"
 	"github.com/pkg/errors"
 	"io"
+	"io/ioutil"
+	"log"
 	"sort"
 	"strings"
 )
@@ -32,8 +35,11 @@ type S3ReaderMaker struct {
 	FileFormat string
 }
 
+// Format of a file
 func (s *S3ReaderMaker) Format() string { return s.FileFormat }
-func (s *S3ReaderMaker) Path() string   { return *s.Key }
+
+// Path to file in bucket
+func (s *S3ReaderMaker) Path() string { return *s.Key }
 
 // Reader creates a new S3 reader for each S3 object.
 func (s *S3ReaderMaker) Reader() (io.ReadCloser, error) {
@@ -66,39 +72,59 @@ type Backup struct {
 	Js     *string
 }
 
-var LatestNotFound = errors.New("LATEST backup not found")
+// ErrLatestNotFound happens when users asks backup-fetch LATEST, but there is no backups
+var ErrLatestNotFound = errors.New("No backups found")
 
 // GetLatest sorts the backups by last modified time
 // and returns the latest backup key.
 func (b *Backup) GetLatest() (string, error) {
+	sortTimes, err := b.GetBackups()
+
+	if err != nil {
+		return "", err
+	}
+
+	return sortTimes[0].Name, nil
+}
+
+// GetBackups receives backup descriptions and sorts them by time
+func (b *Backup) GetBackups() ([]BackupTime, error) {
+	var sortTimes []BackupTime
 	objects := &s3.ListObjectsV2Input{
 		Bucket:    b.Prefix.Bucket,
 		Prefix:    b.Path,
 		Delimiter: aws.String("/"),
 	}
 
-	backups, err := b.Prefix.Svc.ListObjectsV2(objects)
-	if err != nil {
-		return "", errors.Wrap(err, "GetLatest: s3.ListObjectsV2 failed")
+	var backups = make([]*s3.Object, 0)
 
+	err := b.Prefix.Svc.ListObjectsV2Pages(objects, func(files *s3.ListObjectsV2Output, lastPage bool) bool {
+		backups = append(backups, files.Contents...)
+		return true
+	})
+
+	if err != nil {
+		return nil, errors.Wrap(err, "GetLatest: s3.ListObjectsV2 failed")
 	}
 
-	count := len(backups.Contents)
+	count := len(backups)
 
 	if count == 0 {
-		return "", LatestNotFound
+		return nil, ErrLatestNotFound
 	}
 
-	sortTimes := GetBackupTimeSlices(backups)
+	sortTimes = GetBackupTimeSlices(backups)
 
-	return sortTimes[0].Name, nil
+	return sortTimes, nil
 }
-func GetBackupTimeSlices(backups *s3.ListObjectsV2Output) []BackupTime {
-	sortTimes := make([]BackupTime, len(backups.Contents))
-	for i, ob := range backups.Contents {
+
+// GetBackupTimeSlices converts S3 objects to backup description
+func GetBackupTimeSlices(backups []*s3.Object) []BackupTime {
+	sortTimes := make([]BackupTime, len(backups))
+	for i, ob := range backups {
 		key := *ob.Key
 		time := *ob.LastModified
-		sortTimes[i] = BackupTime{stripNameBackup(key), time}
+		sortTimes[i] = BackupTime{stripNameBackup(key), time, stripWalFileName(key)}
 	}
 	slice := TimeSlice(sortTimes)
 	sort.Sort(slice)
@@ -110,6 +136,17 @@ func stripNameBackup(key string) string {
 	all := strings.SplitAfter(key, "/")
 	name := strings.Split(all[len(all)-1], "_backup")[0]
 	return name
+}
+
+// Strips the backup WAL file name.
+func stripWalFileName(key string) string {
+	name := stripNameBackup(key)
+	name = strings.SplitN(name, "_D_", 2)[0]
+
+	if strings.HasPrefix(name, backupNamePrefix) {
+		return name[len(backupNamePrefix):]
+	}
+	return ""
 }
 
 // CheckExistence checks that the specified backup exists.
@@ -134,26 +171,64 @@ func (b *Backup) CheckExistence() (bool, error) {
 	return true, nil
 }
 
-// GetKeys returns all the keys for the files in the specified backup.
+// GetKeys returns all the keys for the Files in the specified backup.
 func (b *Backup) GetKeys() ([]string, error) {
 	objects := &s3.ListObjectsV2Input{
 		Bucket: b.Prefix.Bucket,
-		Prefix: aws.String(*b.Path + *b.Name + "/tar_partitions"),
+		Prefix: aws.String(sanitizePath(*b.Path + *b.Name + "/tar_partitions")),
 	}
 
-	files, err := b.Prefix.Svc.ListObjectsV2(objects)
+	result := make([]string, 0)
+
+	err := b.Prefix.Svc.ListObjectsV2Pages(objects, func(files *s3.ListObjectsV2Output, lastPage bool) bool {
+
+		arr := make([]string, len(files.Contents))
+
+		for i, ob := range files.Contents {
+			key := *ob.Key
+			arr[i] = key
+		}
+
+		result = append(result, arr...)
+		return true
+	})
 	if err != nil {
 		return nil, errors.Wrap(err, "GetKeys: s3.ListObjectsV2 failed")
 	}
 
-	arr := make([]string, len(files.Contents))
+	return result, nil
+}
 
-	for i, ob := range files.Contents {
-		key := *ob.Key
-		arr[i] = key
+// GetWals returns all WAL file keys less then key provided
+func (b *Backup) GetWals(before string) ([]*s3.ObjectIdentifier, error) {
+	objects := &s3.ListObjectsV2Input{
+		Bucket: b.Prefix.Bucket,
+		Prefix: aws.String(sanitizePath(*b.Path)),
+	}
+
+	arr := make([]*s3.ObjectIdentifier, 0)
+
+	err := b.Prefix.Svc.ListObjectsV2Pages(objects, func(files *s3.ListObjectsV2Output, lastPage bool) bool {
+		for _, ob := range files.Contents {
+			key := *ob.Key
+			if stripWalName(key) < before {
+				arr = append(arr, &s3.ObjectIdentifier{Key: aws.String(key)})
+			}
+		}
+		return true
+	})
+
+	if err != nil {
+		return nil, errors.Wrap(err, "GetKeys: s3.ListObjectsV2 failed")
 	}
 
 	return arr, nil
+}
+
+func stripWalName(key string) string {
+	all := strings.SplitAfter(key, "/")
+	name := strings.Split(all[len(all)-1], ".")[0]
+	return name
 }
 
 // Archive contains information associated with
@@ -184,6 +259,21 @@ func (a *Archive) CheckExistence() (bool, error) {
 	return true, nil
 }
 
+// GetETag aquires ETag of the object from S3
+func (a *Archive) GetETag() (*string, error) {
+	arch := &s3.HeadObjectInput{
+		Bucket: a.Prefix.Bucket,
+		Key:    a.Archive,
+	}
+
+	h, err := a.Prefix.Svc.HeadObject(arch)
+	if err != nil {
+		return nil, err
+	}
+
+	return h.ETag, nil
+}
+
 // GetArchive downloads the specified archive from S3.
 func (a *Archive) GetArchive() (io.ReadCloser, error) {
 	input := &s3.GetObjectInput{
@@ -197,4 +287,41 @@ func (a *Archive) GetArchive() (io.ReadCloser, error) {
 	}
 
 	return archive.Body, nil
+}
+
+// SentinelSuffix is a suffix of backup finish sentinel file
+const SentinelSuffix = "_backup_stop_sentinel.json"
+
+func fetchSentinel(backupName string, bk *Backup, pre *Prefix) (dto S3TarBallSentinelDto) {
+	latestSentinel := backupName + SentinelSuffix
+	previousBackupReader := S3ReaderMaker{
+		Backup:     bk,
+		Key:        aws.String(*pre.Server + "/basebackups_005/" + latestSentinel),
+		FileFormat: CheckType(latestSentinel),
+	}
+	prevBackup, err := previousBackupReader.Reader()
+	if err != nil {
+		log.Fatalf("%+v\n", err)
+	}
+	sentinelDto, err := ioutil.ReadAll(prevBackup)
+	if err != nil {
+		log.Fatalf("%+v\n", err)
+	}
+
+	err = json.Unmarshal(sentinelDto, &dto)
+	if err != nil {
+		log.Fatalf("%+v\n", err)
+	}
+	return
+}
+
+// GetBackupPath gets path for basebackup in a bucket
+func GetBackupPath(prefix *Prefix) *string {
+	path := *prefix.Server + "/basebackups_005/"
+	server := sanitizePath(path)
+	return aws.String(server)
+}
+
+func sanitizePath(path string) string {
+	return strings.TrimLeft(path, "/")
 }

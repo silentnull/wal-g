@@ -4,13 +4,14 @@ import (
 	"archive/tar"
 	"bytes"
 	"encoding/binary"
-	"github.com/rasky/go-lzo"
 	"io"
 	"math/rand"
 	"net/http"
 	"regexp"
 	"strconv"
 	"sync/atomic"
+
+	"github.com/rasky/go-lzo"
 )
 
 var counter int32
@@ -150,7 +151,7 @@ func CreateTar(w io.Writer, r *io.LimitedReader) {
 // Compressed tar files are automatically generated. Grab using curl
 // ie. 'curl -sk ...'
 func Handler(w http.ResponseWriter, r *http.Request) {
-	matcher := regexp.MustCompile("/stride-(\\d+).bytes-(\\d+).tar(.lzo)?")
+	matcher := regexp.MustCompile(`/stride-(\d+).bytes-(\d+).tar(.lzo)?`)
 	str := matcher.FindStringSubmatch(r.URL.Path)
 	stride, err := strconv.Atoi(str[1])
 
@@ -166,7 +167,10 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	lzoFlag := str[3]
 
 	sb := NewStrideByteReader(stride)
-	lr := io.LimitedReader{sb, int64(nBytes)}
+	lr := io.LimitedReader{
+		R: sb,
+		N: int64(nBytes),
+	}
 
 	//defer walg.TimeTrack(time.Now(), "HANDLER")
 

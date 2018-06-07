@@ -43,7 +43,7 @@ func DecompressLzo(d io.Writer, s io.Reader) error {
 	skip := 33
 	sk := make([]byte, skip)
 
-	n, err := s.Read(sk)
+	n, err := io.ReadFull(s, sk)
 	if n != len(sk) {
 		return errors.New("DecompressLzo: did not fill skip")
 	}
@@ -54,7 +54,7 @@ func DecompressLzo(d io.Writer, s io.Reader) error {
 	var fileNameLen uint8
 	binary.Read(s, binary.BigEndian, &fileNameLen)
 	fileName := make([]byte, fileNameLen)
-	n, err = s.Read(fileName)
+	n, err = io.ReadFull(s, fileName)
 	if n != len(fileName) {
 		return errors.New("DecompressLzo: did not fill filename")
 	}
@@ -63,7 +63,7 @@ func DecompressLzo(d io.Writer, s io.Reader) error {
 	}
 
 	fileComment := make([]byte, 4)
-	n, err = s.Read(fileComment)
+	n, err = io.ReadFull(s, fileComment)
 	if n != len(fileComment) {
 		return errors.New("DecompressLzo: did not fill fileComment")
 	}
@@ -134,16 +134,16 @@ func DecompressLzo(d io.Writer, s io.Reader) error {
 }
 
 // DecompressLz4 decompresses a .lz4 file. Returns an error upon failure.
-func DecompressLz4(d io.Writer, s io.Reader) error {
+func DecompressLz4(d io.Writer, s io.Reader) (int64, error) {
 	lz := lz4.NewReader(s)
-	_, err := lz.WriteTo(d)
+	n, err := lz.WriteTo(d)
 	if err != nil {
-		return errors.Wrap(err, "DecompressLz4: lz4 write failed")
+		return n, errors.Wrap(err, "DecompressLz4: lz4 write failed")
 	}
-	return nil
+	return n, nil
 }
 
-// Compose io.ReadCloser from two parts
+// ReadCascadeClose composes io.ReadCloser from two parts
 type ReadCascadeClose struct {
 	io.Reader
 	io.Closer
